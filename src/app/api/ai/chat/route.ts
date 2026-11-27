@@ -29,20 +29,32 @@ export async function POST(req: Request) {
     return { threadId: threadId!, history: history.map((h) => ({ role: h.role, text: h.content.text })), ctx };
   });
 
-  try {
-    const res = await runAgent({
-      actor: s, threadId, history, message, defaultAsOfDate: asOfDate ?? null,
-      system: systemPrompt({ userName: s.name, role: ROLE_LABEL[s.role], today: todayIn(330), datasetLabel: ctx?.label ?? null,
-        datasetPeriod: ctx?.event?.historyStart ? `${ctx.event.historyStart} to ${ctx.event.historyEnd} (default as-of ${ctx.asOfDate})` : null }),
-    });
-    const approvals = await withUser(s, async (q) => {
-      await q("insert into ai_messages (workspace_id, thread_id, role, content, trace) values ($1,$2,'assistant',$3,$4)",
-        [s.workspaceId, threadId, JSON.stringify({ text: res.text, proposals: res.proposals }), JSON.stringify(res.trace)]);
-      return res.proposals.length ? loadApprovals(q, s.workspaceId, { ids: res.proposals }) : [];
-    });
-    return NextResponse.json({ threadId, text: res.text, trace: res.trace, approvals });
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ threadId, error: explainAiError(e) }, { status: 502 });
-  }
+  // Stream newline-delimited JSON: progress steps while the analyst works, then the answer.
+  const enc = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (o: unknown) => controller.enqueue(enc.encode(JSON.stringify(o) + "\n"));
+      send({ type: "start", threadId });
+      try {
+        const res = await runAgent({
+          actor: s, threadId, history, message, defaultAsOfDate: asOfDate ?? null,
+          system: systemPrompt({ userName: s.name, role: ROLE_LABEL[s.role], today: todayIn(330), datasetLabel: ctx?.label ?? null,
+            datasetPeriod: ctx?.event?.historyStart ? `${ctx.event.historyStart} to ${ctx.event.historyEnd} (default as-of ${ctx.asOfDate})` : null }),
+          onStep: (step) => send({ type: "step", ...step }),
+        });
+        const approvals = await withUser(s, async (q) => {
+          await q("insert into ai_messages (workspace_id, thread_id, role, content, trace) values ($1,$2,'assistant',$3,$4)",
+            [s.workspaceId, threadId, JSON.stringify({ text: res.text, proposals: res.proposals }), JSON.stringify(res.trace)]);
+          return res.proposals.length ? loadApprovals(q, s.workspaceId, { ids: res.proposals }) : [];
+        });
+        send({ type: "done", threadId, text: res.text, trace: res.trace, approvals });
+      } catch (e) {
+        console.error(e);
+        send({ type: "error", threadId, error: explainAiError(e) });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" } });
 }

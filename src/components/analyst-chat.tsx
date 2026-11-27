@@ -30,6 +30,14 @@ function withTags(children: React.ReactNode): React.ReactNode {
   return children;
 }
 
+/** "get_campaign_performance" → "Looking up campaign performance" */
+function stepLabel(tool: string) {
+  const words = tool.replace(/^(get|list|compare|forecast)_/, (m) => (m === "compare_" ? "comparing " : m === "forecast_" ? "forecasting " : "")).replace(/_/g, " ");
+  if (tool === "draft_task") return "Drafting a task for approval";
+  if (tool === "submit_change_for_approval") return "Drafting a change for approval";
+  return words.startsWith("comparing") || words.startsWith("forecasting") ? words[0].toUpperCase() + words.slice(1) : `Looking up ${words}`;
+}
+
 export function AnalystChat({ configured, users, canDecide, decide, initialQuestion, readTools }: {
   configured: boolean; users: { id: string; name: string }[]; canDecide: boolean; initialQuestion?: string; readTools: { name: string; description: string }[];
   decide: (fd: FormData) => Promise<{ ok: boolean; error?: string; message?: string }>;
@@ -45,18 +53,53 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs, busy]);
 
+  const [steps, setSteps] = useState<string[]>([]);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const t0 = Date.now();
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
+
   const send = async (q: string) => {
     if (!q.trim() || busy) return;
     setMsgs((m) => [...m, { role: "user", text: q }]);
     setText("");
+    setSteps([]);
+    setElapsed(0);
     setBusy(true);
+    const fail = (text: string) => setMsgs((m) => [...m, { role: "assistant", text, error: true }]);
     try {
       const r = await fetch("/api/ai/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId, message: q }) });
-      const j = await r.json().catch(() => ({ error: r.status === 504 ? "The answer took too long and the server stopped it. Try a narrower question, or check the database region (see /api/health)." : `The server returned an error (${r.status}). Open /api/health?ai=1 to see why.` }));
-      if (j.threadId) setThreadId(j.threadId);
-      setMsgs((m) => [...m, r.ok ? { role: "assistant", text: j.text, trace: j.trace, approvals: j.approvals } : { role: "assistant", text: j.error ?? "Request failed.", error: true }]);
+      if (!r.ok || !r.body || !(r.headers.get("content-type") ?? "").includes("ndjson")) {
+        const j = await r.json().catch(() => ({ error: r.status === 504 ? "The answer took too long and the server stopped it. Try a narrower question." : `The server returned an error (${r.status}). Open /api/health?ai=1 to see why.` }));
+        if (j.threadId) setThreadId(j.threadId);
+        return fail(j.error ?? "Request failed.");
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      let finished = false;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          const ev = JSON.parse(line);
+          if (ev.threadId) setThreadId(ev.threadId);
+          if (ev.type === "step") setSteps((st) => [...st, ev.kind === "tool" ? stepLabel(ev.tool) : ev.round === 0 ? "Reading your question" : "Working out the answer"]);
+          else if (ev.type === "done") { finished = true; setMsgs((m) => [...m, { role: "assistant", text: ev.text, trace: ev.trace, approvals: ev.approvals }]); }
+          else if (ev.type === "error") { finished = true; fail(ev.error); }
+        }
+      }
+      if (!finished) fail("The connection closed before the answer arrived. It may have hit the server's time limit; try a narrower question.");
     } catch {
-      setMsgs((m) => [...m, { role: "assistant", text: "Network error.", error: true }]);
+      fail("Network error.");
     } finally {
       setBusy(false);
     }
@@ -72,7 +115,7 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
         <div className="flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite">
           {!configured && (
             <div className="rounded-lg border border-warn/30 bg-warn-soft p-4 text-sm text-[#7a3d06]">
-              <b>AI unavailable.</b> The server has no AI key (<code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code>), so no model can answer questions here. Nothing on this page pretends otherwise. You can still run every read-only analytics tool from the panel on the right; these are the same functions the AI calls.
+              <b>AI unavailable.</b> The server has no AI key (<code>GROQ_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code>), so no model can answer questions here. Nothing on this page pretends otherwise. You can still run every read-only analytics tool from the panel on the right; these are the same functions the AI calls.
             </div>
           )}
           {msgs.length === 0 && configured && (
@@ -108,7 +151,16 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
               )}
             </div>
           ))}
-          {busy && <p className="text-sm text-muted">Querying the data…</p>}
+          {busy && (
+            <div className="text-sm text-muted">
+              <p>Working… <span className="tabular-nums">{elapsed}s</span></p>
+              {steps.length > 0 && (
+                <ul className="mt-1 space-y-0.5 text-xs">
+                  {steps.map((st, i) => <li key={i} className={i === steps.length - 1 ? "text-ink-2" : ""}>{i === steps.length - 1 ? "→ " : "✓ "}{st}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
           <div ref={end} />
         </div>
         <form className="flex gap-2 border-t border-line p-3" onSubmit={(e) => { e.preventDefault(); send(text); }}>

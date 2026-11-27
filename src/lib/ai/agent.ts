@@ -2,23 +2,26 @@ import Anthropic from "@anthropic-ai/sdk";
 import { runTool, TOOL_DEFS, type ToolContext } from "./tools";
 import type { Actor } from "../db";
 
-export const MAX_TOOL_ROUNDS = 8;
+export const MAX_TOOL_ROUNDS = 6;
 /** Stop starting new rounds after this long, so the reply arrives before the hosting time limit. */
 const TIME_BUDGET_MS = 200_000;
 
 /*
  * Which AI service answers. Set one key in Vercel and the app uses it:
+ *   GROQ_API_KEY      → Groq (fastest replies; free tier; key from console.groq.com/keys)
  *   GEMINI_API_KEY    → Google Gemini (has a free tier; key from aistudio.google.com)
  *   OPENAI_API_KEY    → OpenAI / ChatGPT API
  *   ANTHROPIC_API_KEY → Anthropic Claude
  * With more than one key set, AI_PROVIDER=gemini|openai|anthropic picks; otherwise the order above.
  * AI_MODEL overrides the model for any provider (ANTHROPIC_MODEL still works for Anthropic).
  */
-export type Provider = "gemini" | "openai" | "anthropic";
+export type Provider = "groq" | "gemini" | "openai" | "anthropic";
+type CompatProvider = "groq" | "gemini" | "openai";
 
 export function aiProvider(): Provider | null {
   const forced = process.env.AI_PROVIDER?.trim().toLowerCase();
-  if (forced === "gemini" || forced === "openai" || forced === "anthropic") return forced;
+  if (forced === "groq" || forced === "gemini" || forced === "openai" || forced === "anthropic") return forced;
+  if (process.env.GROQ_API_KEY?.trim()) return "groq";
   if (process.env.GEMINI_API_KEY?.trim()) return "gemini";
   if (process.env.OPENAI_API_KEY?.trim()) return "openai";
   if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
@@ -31,18 +34,19 @@ export function aiConfigured() {
 }
 
 export function providerKey(p: Provider) {
-  return { gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY }[p]?.trim() || "";
+  return { groq: process.env.GROQ_API_KEY, gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY }[p]?.trim() || "";
 }
 
-export const PROVIDER_LABEL: Record<Provider, string> = { gemini: "Google Gemini", openai: "OpenAI", anthropic: "Anthropic" };
-const KEY_NAME: Record<Provider, string> = { gemini: "GEMINI_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" };
-export const keyName = (p: Provider | null) => (p ? KEY_NAME[p] : "GEMINI_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY");
+export const PROVIDER_LABEL: Record<Provider, string> = { groq: "Groq", gemini: "Google Gemini", openai: "OpenAI", anthropic: "Anthropic" };
+const KEY_NAME: Record<Provider, string> = { groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" };
+export const keyName = (p: Provider | null) => (p ? KEY_NAME[p] : "GROQ_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY");
 
 export function modelName() {
   const p = aiProvider() ?? "anthropic";
   if (process.env.AI_MODEL?.trim()) return process.env.AI_MODEL.trim();
   if (p === "anthropic") return process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
   if (p === "gemini") return "gemini-flash-latest";
+  if (p === "groq") return "llama-3.3-70b-versatile";
   return "gpt-5-mini";
 }
 
@@ -52,7 +56,8 @@ export function explainAiError(e: unknown): string {
   const p = aiProvider();
   const name = p ? PROVIDER_LABEL[p] : "The AI provider";
   if (/\b(401|403)\b|api key|api_key|authentication|unauthori[sz]ed|permission/i.test(msg)) return `${name} rejected the API key. Check ${keyName(p)} in Vercel.`;
-  if (/credit|billing|balance|insufficient_quota|exceeded your current quota/i.test(msg)) return `The ${name} account has no credit or quota left. Add credit in its console, or switch to a Gemini key (free tier).`;
+  if (/credit|billing|balance|insufficient_quota|exceeded your current quota/i.test(msg)) return `The ${name} account has no credit or quota left. Add credit in its console, or switch to a free Groq or Gemini key.`;
+  if (/\b503\b|high demand|overloaded|unavailable/i.test(msg)) return `${name} is overloaded right now (a temporary problem on their side). The app already retried and tried a lighter model. Wait a minute and ask again, or add a GROQ_API_KEY in Vercel for a faster, more reliable option.`;
   if (/\b429\b|rate limit|resource.?exhausted|too many requests/i.test(msg)) return `${name} is rate-limiting this key. Wait a minute and ask again.`;
   if (/model/i.test(msg) && /not.?found|404|does not exist|unsupported/i.test(msg)) return `The model ${modelName()} is not available to this key. Set AI_MODEL in Vercel to a model your key can use.`;
   return `The AI request failed: ${msg.slice(0, 200)}`;
@@ -109,7 +114,8 @@ export interface AgentResult {
 type CreateFn = (args: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
 
 /** Runs one round's tool calls: read-only lookups together, drafts one at a time in order. */
-async function runToolBatch(calls: { name: string; input: unknown }[], tc: ToolContext) {
+async function runToolBatch(calls: { name: string; input: unknown }[], tc: ToolContext, onTool?: (tool: string) => void) {
+  calls.forEach((c) => onTool?.(c.name));
   const isDraft = (n: string) => n === "draft_task" || n === "submit_change_for_approval";
   const outs: { ok: boolean; result: unknown; ms: number }[] = new Array(calls.length);
   await Promise.all(calls.map(async (c, i) => {
@@ -149,22 +155,72 @@ function cleanSchema(schema: unknown): Record<string, unknown> | undefined {
 type ChatMsg = Record<string, unknown> & { role: string };
 export type ChatFn = (body: Record<string, unknown>) => Promise<{ choices: { message: ChatMsg & { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }; finish_reason?: string }[] }>;
 
-function defaultChat(p: "gemini" | "openai"): ChatFn {
-  const base = process.env.AI_BASE_URL?.trim() || (p === "gemini" ? "https://generativelanguage.googleapis.com/v1beta/openai/" : "https://api.openai.com/v1/");
-  return async (body) => {
+const BASE_URL: Record<CompatProvider, string> = {
+  groq: "https://api.groq.com/openai/v1/",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  openai: "https://api.openai.com/v1/",
+};
+
+/**
+ * Speed: Gemini and OpenAI reasoning models "think" before every reply, and the analyst makes several
+ * replies per question. Low effort is plenty for choosing data lookups and summarising them.
+ * Override with AI_REASONING=none|minimal|low|medium|high (or "default" to send nothing).
+ */
+function speedParams(p: CompatProvider): Record<string, unknown> {
+  const want = process.env.AI_REASONING?.trim().toLowerCase();
+  if (want === "default") return {};
+  if (p === "gemini") return { reasoning_effort: want || "low" };
+  if (p === "openai") return { reasoning_effort: want || "low" };
+  return want ? { reasoning_effort: want } : {};
+}
+
+/** Lighter model to fall back to when the main one is overloaded (AI_FALLBACK_MODEL overrides; "none" disables). */
+function fallbackModel(p: CompatProvider): string | null {
+  const v = process.env.AI_FALLBACK_MODEL?.trim();
+  if (v) return v === "none" ? null : v;
+  if (p === "gemini") return "gemini-flash-lite-latest";
+  if (p === "groq") return "llama-3.1-8b-instant";
+  return null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Overloaded, rate-limited or temporarily failing: worth retrying. 4xx like a bad key or bad model is not. */
+const transient = (status: number) => status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+
+function defaultChat(p: CompatProvider): ChatFn {
+  const base = process.env.AI_BASE_URL?.trim() || BASE_URL[p];
+  let useFallback = false; // once the main model was overloaded, stay on the fallback for this question
+  const post = async (body: Record<string, unknown>) => {
     const r = await fetch(base.replace(/\/?$/, "/") + "chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${providerKey(p)}` },
       body: JSON.stringify(body),
     });
-    const text = await r.text();
-    if (!r.ok) throw new Error(`${r.status} ${text.slice(0, 400)}`);
-    return JSON.parse(text);
+    return { status: r.status, text: await r.text() };
+  };
+  return async (body) => {
+    const fb = fallbackModel(p);
+    // Main model: up to 3 tries with short backoff; then the fallback model: up to 2 tries.
+    const plan: { model: string; wait: number }[] = [];
+    if (!useFallback) plan.push({ model: String(body.model), wait: 0 }, { model: String(body.model), wait: 1000 }, { model: String(body.model), wait: 2500 });
+    if (fb && fb !== body.model) plan.push({ model: fb, wait: useFallback ? 0 : 500 }, { model: fb, wait: 2000 });
+    if (!plan.length) plan.push({ model: String(body.model), wait: 0 });
+    let last = { status: 0, text: "" };
+    for (const step of plan) {
+      if (step.wait) await sleep(step.wait);
+      last = await post({ ...body, model: step.model });
+      if (last.status >= 200 && last.status < 300) {
+        if (step.model !== body.model) useFallback = true;
+        return JSON.parse(last.text);
+      }
+      if (!transient(last.status)) break;
+    }
+    throw new Error(`${last.status} ${last.text.slice(0, 400)}`);
   };
 }
 
 /** Same loop as the Anthropic one, over the OpenAI chat-completions format (used by OpenAI and Gemini). */
-async function runAgentOpenAICompatible(opts: Parameters<typeof runAgent>[0], p: "gemini" | "openai"): Promise<AgentResult> {
+async function runAgentOpenAICompatible(opts: Parameters<typeof runAgent>[0], p: CompatProvider): Promise<AgentResult> {
   const chat = opts.chat ?? defaultChat(p);
   const tc: ToolContext = { actor: opts.actor, threadId: opts.threadId, defaultAsOfDate: opts.defaultAsOfDate, proposals: [] };
   const tools = TOOL_DEFS.map((t) => {
@@ -181,7 +237,8 @@ async function runAgentOpenAICompatible(opts: Parameters<typeof runAgent>[0], p:
   let stop: string | null = null;
   const started = Date.now();
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-    const resp = await chat({ model: modelName(), messages, tools, tool_choice: "auto" });
+    opts.onStep?.({ kind: "thinking", round });
+    const resp = await chat({ model: modelName(), messages, tools, tool_choice: "auto", ...speedParams(p) });
     const choice = resp.choices?.[0];
     if (!choice) throw new Error("The AI service returned no answer.");
     const msg = choice.message;
@@ -201,10 +258,10 @@ async function runAgentOpenAICompatible(opts: Parameters<typeof runAgent>[0], p:
       try { input = c.function.arguments ? JSON.parse(c.function.arguments) : {}; } catch { input = {}; }
       return { name: c.function.name, input };
     });
-    const outs = await runToolBatch(parsed, tc);
+    const outs = await runToolBatch(parsed, tc, (tool) => opts.onStep?.({ kind: "tool", tool }));
     calls.forEach((c, i) => {
       trace.push({ tool: parsed[i].name, input: parsed[i].input, ok: outs[i].ok, ms: outs[i].ms, result: outs[i].result });
-      messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify(outs[i].result).slice(0, 60000) });
+      messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify(outs[i].result).slice(0, 24000) });
     });
     if (Date.now() - started > TIME_BUDGET_MS) {
       finalText = (finalText ? finalText + "\n\n" : "") + "_I stopped early to stay within the server's time limit. Ask a narrower question for a complete answer._";
@@ -225,7 +282,7 @@ export async function pingAi(): Promise<{ ok: boolean; provider: string | null; 
       const r = await new Anthropic({ apiKey: providerKey(p) }).messages.create({ model: modelName(), max_tokens: 5, messages: [{ role: "user", content: "Reply with: ok" }] });
       reply = r.content.find((c) => c.type === "text")?.text ?? "";
     } else {
-      const r = await defaultChat(p)({ model: modelName(), messages: [{ role: "user", content: "Reply with: ok" }] });
+      const r = await defaultChat(p)({ model: modelName(), messages: [{ role: "user", content: "Reply with: ok" }], ...speedParams(p) });
       reply = String(r.choices?.[0]?.message?.content ?? "");
     }
     return { ok: true, provider: PROVIDER_LABEL[p], model: modelName(), ms: Date.now() - t, reply: reply.slice(0, 40) };
@@ -243,9 +300,11 @@ export async function runAgent(opts: {
   defaultAsOfDate?: string | null;
   create?: CreateFn; // injectable for tests (Anthropic format)
   chat?: ChatFn; // injectable for tests (OpenAI / Gemini format)
+  onStep?: (step: { kind: "thinking"; round: number } | { kind: "tool"; tool: string }) => void; // live progress
 }): Promise<AgentResult> {
-  const p = opts.create ? "anthropic" : opts.chat ? (aiProvider() === "openai" ? "openai" : "gemini") : aiProvider();
-  if (p === "gemini" || p === "openai") return runAgentOpenAICompatible(opts, p);
+  const cur = aiProvider();
+  const p = opts.create ? "anthropic" : opts.chat ? (cur && cur !== "anthropic" ? cur : "gemini") : cur;
+  if (p === "groq" || p === "gemini" || p === "openai") return runAgentOpenAICompatible(opts, p);
   const create: CreateFn = opts.create ?? ((args) => new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }).messages.create(args));
   const tc: ToolContext = { actor: opts.actor, threadId: opts.threadId, defaultAsOfDate: opts.defaultAsOfDate, proposals: [] };
   // Only prior text goes back to the model, never prior tool results, so numbers are re-queried each turn.
@@ -255,6 +314,7 @@ export async function runAgent(opts: {
   let stop: string | null = null;
   const started = Date.now();
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    opts.onStep?.({ kind: "thinking", round });
     const resp = await create({ model: modelName(), max_tokens: 2500, system: opts.system, tools: TOOL_DEFS as Anthropic.Tool[], messages });
     stop = resp.stop_reason;
     messages.push({ role: "assistant", content: resp.content });
@@ -266,10 +326,10 @@ export async function runAgent(opts: {
       finalText = (finalText ? finalText + "\n\n" : "") + "_I stopped after the maximum number of data lookups. Ask a narrower question for a complete answer._";
       break;
     }
-    const outs = await runToolBatch(uses.map((u) => ({ name: u.name, input: u.input })), tc);
+    const outs = await runToolBatch(uses.map((u) => ({ name: u.name, input: u.input })), tc, (tool) => opts.onStep?.({ kind: "tool", tool }));
     const results: Anthropic.ToolResultBlockParam[] = uses.map((u, i) => {
       trace.push({ tool: u.name, input: u.input, ok: outs[i].ok, ms: outs[i].ms, result: outs[i].result });
-      return { type: "tool_result", tool_use_id: u.id, is_error: !outs[i].ok, content: JSON.stringify(outs[i].result).slice(0, 60000) };
+      return { type: "tool_result", tool_use_id: u.id, is_error: !outs[i].ok, content: JSON.stringify(outs[i].result).slice(0, 24000) };
     });
     messages.push({ role: "user", content: results });
     if (Date.now() - started > TIME_BUDGET_MS) {
