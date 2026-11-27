@@ -1,0 +1,110 @@
+{
+  "dedup_rows_removed": {
+    "Read me": 0,
+    "Field guide": 0,
+    "Event": 0,
+    "Targets": 0,
+    "Campaigns": 0,
+    "Daily Marketing": 2,
+    "People": 0,
+    "Interest and Engagement": 0,
+    "Registrations": 0,
+    "Registration History": 4,
+    "Check-ins": 20
+  },
+  "people_total": 3685,
+  "people_by_type": {
+    "external": 3625,
+    "internal": 40,
+    "staff": 10,
+    "test": 10
+  },
+  "identified_external_people": 3625,
+  "registrations_total": 2840,
+  "registered_external_people": 2800,
+  "latest_status_external": {
+    "confirmed": 2500,
+    "cancelled": 183,
+    "waitlisted": 88,
+    "interested": 29
+  },
+  "unique_verified_external_attendees": 2050,
+  "verified_external_attendees_by_day": {
+    "2025-04-12": 1430,
+    "2025-04-13": 1345
+  },
+  "attendees_both_days": 725,
+  "verified_admission_rows_external": 3250,
+  "walk_in_attendees_without_registration": 125,
+  "checkin_results": {
+    "admitted": 3290,
+    "denied": 50,
+    "pending": 30
+  },
+  "marketing_spend_total_inr": 274000,
+  "latest_target": {
+    "identified_external_people_goal": 3600,
+    "registration_goal": 3200,
+    "unique_external_visitors_goal": 2200,
+    "marketing_budget_inr": 300000,
+    "target_version": "Attendee revised plan"
+  },
+  "per_campaign": {
+    "C01": {
+      "name": "Campus Ambassadors",
+      "spend_inr": 42000,
+      "registered_people": 520,
+      "verified_attendees_from_registrations": 390,
+      "show_rate": 0.75,
+      "first_touch_identified_people": 600
+    },
+    "C02": {
+      "name": "Paid Social",
+      "spend_inr": 93000,
+      "registered_people": 680,
+      "verified_attendees_from_registrations": 340,
+      "show_rate": 0.5,
+      "first_touch_identified_people": 960
+    },
+    "C03": {
+      "name": "Creator Partners",
+      "spend_inr": 59000,
+      "registered_people": 350,
+      "verified_attendees_from_registrations": 175,
+      "show_rate": 0.5,
+      "first_touch_identified_people": 490
+    },
+    "C04": {
+      "name": "College Partnerships",
+      "spend_inr": 31000,
+      "registered_people": 450,
+      "verified_attendees_from_registrations": 385,
+      "show_rate": 0.8556,
+      "first_touch_identified_people": 500
+    },
+    "C05": {
+      "name": "Student Referrals",
+      "spend_inr": 19000,
+      "registered_people": 350,
+      "verified_attendees_from_registrations": 275,
+      "show_rate": 0.7857,
+      "first_touch_identified_people": 410
+    },
+    "C06": {
+      "name": "Organic Search",
+      "spend_inr": 14000,
+      "registered_people": 250,
+      "verified_attendees_from_registrations": 195,
+      "show_rate": 0.78,
+      "first_touch_identified_people": 290
+    },
+    "C07": {
+      "name": "Community Groups",
+      "spend_inr": 16000,
+      "registered_people": 200,
+      "verified_attendees_from_registrations": 165,
+      "show_rate": 0.825,
+      "first_touch_identified_people": 250
+    }
+  }
+}

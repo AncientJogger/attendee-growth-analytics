@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-canvas: #fafbfd;
+  --color-ink: #0b1f3a;
+  --color-ink-2: #334766;
+  --color-muted: #5b6b84;
+  --color-line: #e3e8f0;
+  --color-brand: #1d4ed8;
+  --color-brand-soft: #eef3fd;
+  --color-good: #15803d;
+  --color-good-soft: #e9f7ee;
+  --color-warn: #b45309;
+  --color-warn-soft: #fdf3e3;
+  --color-bad: #b91c1c;
+  --color-bad-soft: #fdecec;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html, body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+.prose-ai h1, .prose-ai h2, .prose-ai h3 { font-weight: 600; margin: 0.6rem 0 0.3rem; }
+.prose-ai p { margin: 0.35rem 0; }
+.prose-ai ul, .prose-ai ol { margin: 0.25rem 0 0.5rem 1.2rem; list-style: disc; }
+.prose-ai ol { list-style: decimal; }
+.prose-ai li { margin: 0.15rem 0; }
+.prose-ai table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.85rem; }
+.prose-ai th, .prose-ai td { border: 1px solid var(--color-line); padding: 0.25rem 0.5rem; text-align: left; }
+.prose-ai code { background: var(--color-brand-soft); padding: 0 0.25rem; border-radius: 4px; }
