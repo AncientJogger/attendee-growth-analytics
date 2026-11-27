@@ -57,6 +57,7 @@ export function explainAiError(e: unknown): string {
   const name = p ? PROVIDER_LABEL[p] : "The AI provider";
   if (/\b(401|403)\b|api key|api_key|authentication|unauthori[sz]ed|permission/i.test(msg)) return `${name} rejected the API key. Check ${keyName(p)} in Vercel.`;
   if (/credit|billing|balance|insufficient_quota|exceeded your current quota/i.test(msg)) return `The ${name} account has no credit or quota left. Add credit in its console, or switch to a free Groq or Gemini key.`;
+  if (/\b503\b|high demand|overloaded|unavailable/i.test(msg)) return `${name} is overloaded right now (a temporary problem on their side). The app already retried and tried a lighter model. Wait a minute and ask again, or add a GROQ_API_KEY in Vercel for a faster, more reliable option.`;
   if (/\b429\b|rate limit|resource.?exhausted|too many requests/i.test(msg)) return `${name} is rate-limiting this key. Wait a minute and ask again.`;
   if (/model/i.test(msg) && /not.?found|404|does not exist|unsupported/i.test(msg)) return `The model ${modelName()} is not available to this key. Set AI_MODEL in Vercel to a model your key can use.`;
   return `The AI request failed: ${msg.slice(0, 200)}`;
@@ -173,17 +174,48 @@ function speedParams(p: CompatProvider): Record<string, unknown> {
   return want ? { reasoning_effort: want } : {};
 }
 
+/** Lighter model to fall back to when the main one is overloaded (AI_FALLBACK_MODEL overrides; "none" disables). */
+function fallbackModel(p: CompatProvider): string | null {
+  const v = process.env.AI_FALLBACK_MODEL?.trim();
+  if (v) return v === "none" ? null : v;
+  if (p === "gemini") return "gemini-flash-lite-latest";
+  if (p === "groq") return "llama-3.1-8b-instant";
+  return null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Overloaded, rate-limited or temporarily failing: worth retrying. 4xx like a bad key or bad model is not. */
+const transient = (status: number) => status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+
 function defaultChat(p: CompatProvider): ChatFn {
   const base = process.env.AI_BASE_URL?.trim() || BASE_URL[p];
-  return async (body) => {
+  let useFallback = false; // once the main model was overloaded, stay on the fallback for this question
+  const post = async (body: Record<string, unknown>) => {
     const r = await fetch(base.replace(/\/?$/, "/") + "chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${providerKey(p)}` },
       body: JSON.stringify(body),
     });
-    const text = await r.text();
-    if (!r.ok) throw new Error(`${r.status} ${text.slice(0, 400)}`);
-    return JSON.parse(text);
+    return { status: r.status, text: await r.text() };
+  };
+  return async (body) => {
+    const fb = fallbackModel(p);
+    // Main model: up to 3 tries with short backoff; then the fallback model: up to 2 tries.
+    const plan: { model: string; wait: number }[] = [];
+    if (!useFallback) plan.push({ model: String(body.model), wait: 0 }, { model: String(body.model), wait: 1000 }, { model: String(body.model), wait: 2500 });
+    if (fb && fb !== body.model) plan.push({ model: fb, wait: useFallback ? 0 : 500 }, { model: fb, wait: 2000 });
+    if (!plan.length) plan.push({ model: String(body.model), wait: 0 });
+    let last = { status: 0, text: "" };
+    for (const step of plan) {
+      if (step.wait) await sleep(step.wait);
+      last = await post({ ...body, model: step.model });
+      if (last.status >= 200 && last.status < 300) {
+        if (step.model !== body.model) useFallback = true;
+        return JSON.parse(last.text);
+      }
+      if (!transient(last.status)) break;
+    }
+    throw new Error(`${last.status} ${last.text.slice(0, 400)}`);
   };
 }
 
