@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { withSystem, usingEmbeddedDb } from "@/lib/db";
-import { modelName } from "@/lib/ai/agent";
+import { pingAi } from "@/lib/ai/agent";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -11,19 +10,8 @@ export const maxDuration = 300;
  * in an empty database (can take a while on a remote host); later calls answer straight away.
  * It reports only whether the database works, never connection details.
  */
-/** With ?ai=1, also sends a one-word test message to the AI provider and reports the result. */
-async function checkAi() {
-  const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (!key) return { ok: false, error: "ANTHROPIC_API_KEY is not set in this deployment. Add it in Vercel and redeploy." };
-  if (!key.startsWith("sk-ant-")) return { ok: false, error: "ANTHROPIC_API_KEY does not start with sk-ant-. Check you pasted the whole key, with no quotes or spaces." };
-  const t = Date.now();
-  try {
-    const r = await new Anthropic({ apiKey: key }).messages.create({ model: modelName(), max_tokens: 5, messages: [{ role: "user", content: "Reply with: ok" }] });
-    return { ok: true, model: modelName(), ms: Date.now() - t, reply: r.content.find((c) => c.type === "text")?.text ?? "" };
-  } catch (e) {
-    return { ok: false, model: modelName(), error: (e instanceof Error ? e.message : String(e)).slice(0, 300) };
-  }
-}
+/** With ?ai=1, also sends a one-word test message to the configured AI service and reports the result. */
+const checkAi = pingAi;
 
 export async function GET(req: Request) {
   const t = Date.now();

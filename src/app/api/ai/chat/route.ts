@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSession, ROLE_LABEL } from "@/lib/auth";
 import { withUser } from "@/lib/db";
-import { aiConfigured, runAgent, systemPrompt } from "@/lib/ai/agent";
+import { aiConfigured, explainAiError, keyName, runAgent, systemPrompt } from "@/lib/ai/agent";
 import { getDatasetContext, todayIn } from "@/lib/analytics/context";
 import { loadApprovals } from "@/lib/approvals-view";
 
@@ -14,7 +14,7 @@ const body = z.object({ threadId: z.string().uuid().nullable().optional(), messa
 export async function POST(req: Request) {
   const s = await getSession();
   if (!s) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
-  if (!aiConfigured()) return NextResponse.json({ error: "AI unavailable: ANTHROPIC_API_KEY is not configured on the server. The analytics tools still work from the panel on this page." }, { status: 503 });
+  if (!aiConfigured()) return NextResponse.json({ error: `AI unavailable: no AI key is configured on the server (${keyName(null)}). The analytics tools still work from the panel on this page.` }, { status: 503 });
   const parsed = body.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
   const { message, asOfDate } = parsed.data;
@@ -43,10 +43,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ threadId, text: res.text, trace: res.trace, approvals });
   } catch (e) {
     console.error(e);
-    const msg = (e as Error).message ?? "";
-    return NextResponse.json({ threadId, error: /api key|authentication|401/i.test(msg) ? "The AI provider rejected the API key. Check ANTHROPIC_API_KEY in Vercel."
-      : /credit|billing|balance/i.test(msg) ? "The AI account has no credit left. Add credit or raise the spend limit in the Anthropic Console."
-      : /model/i.test(msg) && /not.?found|404/i.test(msg) ? `The model ${process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5"} is not available to this key. Set ANTHROPIC_MODEL in Vercel to a model your key can use.`
-      : `The AI request failed: ${msg.slice(0, 200)}` }, { status: 502 });
+    return NextResponse.json({ threadId, error: explainAiError(e) }, { status: 502 });
   }
 }

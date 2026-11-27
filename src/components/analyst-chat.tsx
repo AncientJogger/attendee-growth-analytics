@@ -68,7 +68,7 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
         <div className="flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite">
           {!configured && (
             <div className="rounded-lg border border-warn/30 bg-warn-soft p-4 text-sm text-[#7a3d06]">
-              <b>AI unavailable.</b> The server has no <code>ANTHROPIC_API_KEY</code>, so no model can answer questions here. Nothing on this page pretends otherwise. You can still run every read-only analytics tool from the panel on the right; these are the same functions the AI calls.
+              <b>AI unavailable.</b> The server has no AI key (<code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code>), so no model can answer questions here. Nothing on this page pretends otherwise. You can still run every read-only analytics tool from the panel on the right; these are the same functions the AI calls.
             </div>
           )}
           {msgs.length === 0 && configured && (
