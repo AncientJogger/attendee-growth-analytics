@@ -5,19 +5,23 @@ import { withUser } from "@/lib/db";
 import { aiConfigured, explainAiError, keyName, runAgent, systemPrompt } from "@/lib/ai/agent";
 import { getDatasetContext, todayIn } from "@/lib/analytics/context";
 import { loadApprovals } from "@/lib/approvals-view";
+import { quickAnswer } from "@/lib/ai/quick";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const body = z.object({ threadId: z.string().uuid().nullable().optional(), message: z.string().trim().min(1).max(4000), asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional() });
+/** Longest the AI may take before the data-only answer is used instead (AI_TOTAL_TIMEOUT_MS overrides). */
+const aiBudget = () => Number(process.env.AI_TOTAL_TIMEOUT_MS) || 45_000;
+
+const body = z.object({ forceAi: z.boolean().optional(), threadId: z.string().uuid().nullable().optional(), message: z.string().trim().min(1).max(4000), asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional() });
 
 export async function POST(req: Request) {
   const s = await getSession();
   if (!s) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
-  if (!aiConfigured()) return NextResponse.json({ error: `AI unavailable: no AI key is configured on the server (${keyName(null)}). The analytics tools still work from the panel on this page.` }, { status: 503 });
   const parsed = body.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
-  const { message, asOfDate } = parsed.data;
+  const { message, asOfDate, forceAi } = parsed.data;
+  const hasAi = aiConfigured();
 
   const { threadId, history, ctx } = await withUser(s, async (q) => {
     let threadId = parsed.data.threadId ?? null;
@@ -35,19 +39,44 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = (o: unknown) => controller.enqueue(enc.encode(JSON.stringify(o) + "\n"));
       send({ type: "start", threadId });
-      try {
-        const res = await runAgent({
-          actor: s, threadId, history, message, defaultAsOfDate: asOfDate ?? null,
-          system: systemPrompt({ userName: s.name, role: ROLE_LABEL[s.role], today: todayIn(330), datasetLabel: ctx?.label ?? null,
-            datasetPeriod: ctx?.event?.historyStart ? `${ctx.event.historyStart} to ${ctx.event.historyEnd} (default as-of ${ctx.asOfDate})` : null }),
-          onStep: (step) => send({ type: "step", ...step }),
-        });
+      const tc = { actor: s, threadId, defaultAsOfDate: asOfDate ?? null, proposals: [] as string[] };
+      const finish = async (text: string, trace: unknown[], proposals: string[], mode: "instant" | "ai" | "fallback", note?: string) => {
         const approvals = await withUser(s, async (q) => {
           await q("insert into ai_messages (workspace_id, thread_id, role, content, trace) values ($1,$2,'assistant',$3,$4)",
-            [s.workspaceId, threadId, JSON.stringify({ text: res.text, proposals: res.proposals }), JSON.stringify(res.trace)]);
-          return res.proposals.length ? loadApprovals(q, s.workspaceId, { ids: res.proposals }) : [];
+            [s.workspaceId, threadId, JSON.stringify({ text, proposals, mode }), JSON.stringify(trace)]);
+          return proposals.length ? loadApprovals(q, s.workspaceId, { ids: proposals }) : [];
         });
-        send({ type: "done", threadId, text: res.text, trace: res.trace, approvals });
+        send({ type: "done", threadId, text, trace, approvals, mode, note, canAskAi: hasAi && mode !== "ai" });
+      };
+      try {
+        // 1. Instant: known question types are answered straight from the data (no model call).
+        if (!forceAi || !hasAi) {
+          send({ type: "step", kind: "instant" });
+          const quick = await quickAnswer(message, tc, { loose: !hasAi }).catch((e) => { console.error(e); return null; });
+          if (quick) return await finish(quick.text, quick.trace, [], "instant");
+          if (!hasAi) return send({ type: "error", threadId, error: `This question needs the AI, and no AI key is configured on the server (${keyName(null)}). Try one of the suggested questions, which are answered straight from the data.` });
+        }
+        // 2. The AI, with an overall time limit.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`AI_TOTAL_TIMEOUT did not reply within ${Math.round(aiBudget() / 1000)} s`)), aiBudget()); });
+        try {
+          const res = await Promise.race([runAgent({
+            actor: s, threadId, history, message, defaultAsOfDate: asOfDate ?? null,
+            system: systemPrompt({ userName: s.name, role: ROLE_LABEL[s.role], today: todayIn(330), datasetLabel: ctx?.label ?? null,
+              datasetPeriod: ctx?.event?.historyStart ? `${ctx.event.historyStart} to ${ctx.event.historyEnd} (default as-of ${ctx.asOfDate})` : null }),
+            onStep: (step) => send({ type: "step", ...step }),
+          }), timeout]);
+          await finish(res.text, res.trace, res.proposals, "ai");
+        } catch (e) {
+          console.error(e);
+          // 3. The AI failed or was too slow: give the closest answer the data supports instead of an error.
+          const why = explainAiError(e);
+          const quick = await quickAnswer(message, tc, { loose: true }).catch(() => null);
+          if (quick) await finish(quick.text, quick.trace, [], "fallback", why);
+          else send({ type: "error", threadId, error: why });
+        } finally {
+          clearTimeout(timer);
+        }
       } catch (e) {
         console.error(e);
         send({ type: "error", threadId, error: explainAiError(e) });

@@ -6,7 +6,14 @@ import { ApprovalCard } from "./approval-card";
 import type { ApprovalView } from "@/lib/approvals-view";
 
 type Trace = { tool: string; input: unknown; ok: boolean; ms: number; result: unknown };
-type Msg = { role: "user" | "assistant"; text: string; trace?: Trace[]; approvals?: ApprovalView[]; error?: boolean };
+type Mode = "instant" | "ai" | "fallback";
+type Msg = { role: "user" | "assistant"; text: string; trace?: Trace[]; approvals?: ApprovalView[]; error?: boolean; mode?: Mode; note?: string; canAskAi?: boolean; question?: string };
+
+const MODE_BADGE: Record<Mode, { text: string; cls: string }> = {
+  instant: { text: "Instant answer · straight from the data, no AI wait", cls: "bg-[#eef6f7] text-[#0f6470]" },
+  ai: { text: "AI analyst answer", cls: "bg-brand-soft text-brand" },
+  fallback: { text: "Data answer · the AI was unavailable", cls: "bg-warn-soft text-warn" },
+};
 
 const SUGGESTIONS = [
   "Which campaigns have the best and worst cost per verified attendee?",
@@ -62,16 +69,16 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
     return () => clearInterval(id);
   }, [busy]);
 
-  const send = async (q: string) => {
+  const send = async (q: string, forceAi = false) => {
     if (!q.trim() || busy) return;
-    setMsgs((m) => [...m, { role: "user", text: q }]);
+    setMsgs((m) => [...m, { role: "user", text: forceAi ? `${q} (deeper answer from the AI)` : q }]);
     setText("");
     setSteps([]);
     setElapsed(0);
     setBusy(true);
     const fail = (text: string) => setMsgs((m) => [...m, { role: "assistant", text, error: true }]);
     try {
-      const r = await fetch("/api/ai/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId, message: q }) });
+      const r = await fetch("/api/ai/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId, message: q, forceAi }) });
       if (!r.ok || !r.body || !(r.headers.get("content-type") ?? "").includes("ndjson")) {
         const j = await r.json().catch(() => ({ error: r.status === 504 ? "The answer took too long and the server stopped it. Try a narrower question." : `The server returned an error (${r.status}). Open /api/health?ai=1 to see why.` }));
         if (j.threadId) setThreadId(j.threadId);
@@ -92,8 +99,8 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
           if (!line) continue;
           const ev = JSON.parse(line);
           if (ev.threadId) setThreadId(ev.threadId);
-          if (ev.type === "step") setSteps((st) => [...st, ev.kind === "tool" ? stepLabel(ev.tool) : ev.round === 0 ? "Reading your question" : "Working out the answer"]);
-          else if (ev.type === "done") { finished = true; setMsgs((m) => [...m, { role: "assistant", text: ev.text, trace: ev.trace, approvals: ev.approvals }]); }
+          if (ev.type === "step") setSteps((st) => [...st, ev.kind === "tool" ? stepLabel(ev.tool) : ev.kind === "instant" ? "Checking the data" : ev.round === 0 ? "Reading your question" : "Working out the answer"]);
+          else if (ev.type === "done") { finished = true; setMsgs((m) => [...m, { role: "assistant", text: ev.text, trace: ev.trace, approvals: ev.approvals, mode: ev.mode, note: ev.note, canAskAi: ev.canAskAi, question: q }]); }
           else if (ev.type === "error") { finished = true; fail(ev.error); }
         }
       }
@@ -109,16 +116,16 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
     <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
       <div className="flex min-h-[70vh] flex-col rounded-xl border border-line bg-white">
         <div className="flex items-center justify-between border-b border-line px-4 py-2 text-xs text-muted">
-          <span>{configured ? "Answers come from tool calls against the current data. Proposals need approval." : "AI unavailable on this deployment"}</span>
+          <span>Common questions are answered instantly from the data; other questions go to the AI. Proposals need approval.</span>
           <button className="text-brand" onClick={() => { setMsgs([]); setThreadId(null); }}>New conversation</button>
         </div>
         <div className="flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite">
           {!configured && (
             <div className="rounded-lg border border-warn/30 bg-warn-soft p-4 text-sm text-[#7a3d06]">
-              <b>AI unavailable.</b> The server has no AI key (<code>GROQ_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code>), so no model can answer questions here. Nothing on this page pretends otherwise. You can still run every read-only analytics tool from the panel on the right; these are the same functions the AI calls.
+              <b>No AI key on this server.</b> Common questions (tasks, campaigns, attendance, funnel, targets, budget and more) are still answered instantly from the data. Open-ended questions need an AI key (<code>GROQ_API_KEY</code> or <code>GEMINI_API_KEY</code>).
             </div>
           )}
-          {msgs.length === 0 && configured && (
+          {msgs.length === 0 && (
             <div>
               <p className="mb-2 text-sm text-muted">Try a question:</p>
               <div className="flex flex-wrap gap-2">{SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)} className="rounded-full border border-line px-3 py-1 text-xs text-ink-2 hover:bg-brand-soft">{s}</button>)}</div>
@@ -130,9 +137,18 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
                 <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-brand px-4 py-2 text-sm text-white">{m.text}</div>
               ) : (
                 <div className="max-w-full space-y-3">
+                  {m.mode && !m.error && (
+                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className={`rounded px-1.5 py-0.5 font-medium ${MODE_BADGE[m.mode].cls}`}>{MODE_BADGE[m.mode].text}</span>
+                      {m.note && <span className="text-muted">{m.note}</span>}
+                    </div>
+                  )}
                   <div className={`prose-ai rounded-2xl rounded-bl-sm border px-4 py-3 text-sm ${m.error ? "border-bad/30 bg-bad-soft text-bad" : "border-line bg-[#fbfcfe]"}`}>
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ li: ({ children }) => <li>{withTags(children)}</li>, p: ({ children }) => <p>{withTags(children)}</p> }}>{m.text}</ReactMarkdown>
                   </div>
+                  {m.canAskAi && m.question && (
+                    <button disabled={busy} onClick={() => send(m.question!, true)} className="rounded-full border border-line px-3 py-1 text-xs text-brand hover:bg-brand-soft disabled:opacity-50">Ask the AI for a deeper answer</button>
+                  )}
                   {m.approvals?.map((a) => <ApprovalCard key={a.id} a={a} users={users} canDecide={canDecide} decide={decide} />)}
                   {m.trace && m.trace.length > 0 && (
                     <details className="text-xs text-muted">
@@ -164,10 +180,10 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
           <div ref={end} />
         </div>
         <form className="flex gap-2 border-t border-line p-3" onSubmit={(e) => { e.preventDefault(); send(text); }}>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} disabled={!configured || busy} rows={2} placeholder={configured ? "Ask about attendance, campaigns, tasks, budget…" : "AI unavailable"}
+          <textarea value={text} onChange={(e) => setText(e.target.value)} disabled={busy} rows={2} placeholder="Ask about attendance, campaigns, tasks, budget…"
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(text); } }}
             className="flex-1 resize-none rounded-lg border border-line px-3 py-2 text-sm" aria-label="Question for the AI analyst" />
-          <button disabled={!configured || busy || !text.trim()} className="rounded-lg bg-brand px-4 text-sm font-medium text-white disabled:opacity-50">Ask</button>
+          <button disabled={busy || !text.trim()} className="rounded-lg bg-brand px-4 text-sm font-medium text-white disabled:opacity-50">Ask</button>
         </form>
       </div>
       <ToolPanel tools={readTools} />
