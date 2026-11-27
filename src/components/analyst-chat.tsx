@@ -39,7 +39,11 @@ export function AnalystChat({ configured, users, canDecide, decide, initialQuest
   const [text, setText] = useState(initialQuestion ?? "");
   const [busy, setBusy] = useState(false);
   const end = useRef<HTMLDivElement>(null);
-  useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [msgs, busy]);
+  // Braces matter: newer browsers return a Promise from scrollIntoView, and React would treat a returned
+  // value as a cleanup function and crash the page.
+  useEffect(() => {
+    end.current?.scrollIntoView({ behavior: "smooth" });
+  }, [msgs, busy]);
 
   const send = async (q: string) => {
     if (!q.trim() || busy) return;
