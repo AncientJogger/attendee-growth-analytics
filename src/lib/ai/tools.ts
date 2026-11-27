@@ -1,7 +1,7 @@
 // Tools the AI Growth Analyst can call. Each one validates its input, runs inside the
 // requesting user's RLS-scoped transaction and returns compact JSON. No free-form SQL.
 import { z } from "zod";
-import { withUser, type Actor, type Q } from "../db";
+import { systemQuery, withUser, type Actor, type Q } from "../db";
 import { getDatasetContext, getStrategy, type DatasetContext } from "../analytics/context";
 import { attendanceMetrics, attributionViews, campaignPerformance, compareRanges, funnelMetrics, registrationMetrics, targetsVsActual, weeklyTrend } from "../analytics/metrics";
 import { budgetSummary, capacityStatus, dataQualityReport, forecastAttendance, initiativeOverview, listTasks, taskMetrics } from "../analytics/management";
@@ -318,17 +318,43 @@ export const TOOLS: Tool[] = [
 
 export const TOOL_DEFS = TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
 
+const WRITE_TOOLS = new Set(["draft_task", "submit_change_for_approval"]);
+
+/*
+ * Read-only lookups are cached per user and per workspace data version (every change in the app bumps
+ * that version in the same transaction), so a repeated or follow-up question reuses results instead of
+ * querying again, and a changed workspace is always re-queried.
+ */
+declare global {
+  var __fgaToolCache: Map<string, Promise<unknown>> | undefined;
+}
+async function cachedLookup(parts: unknown[], actor: Actor, compute: () => Promise<unknown>) {
+  if (process.env.PAGE_CACHE === "off") return compute();
+  const [w] = await systemQuery<{ v: string; dv: string | null }>("select data_version::text v, active_dataset_version_id::text dv from workspaces where id = $1", [actor.workspaceId]);
+  const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+  const key = JSON.stringify([parts, actor.userId, w?.v, w?.dv, today]);
+  const m = (globalThis.__fgaToolCache ??= new Map());
+  const hit = m.get(key);
+  if (hit) return hit;
+  const p = compute();
+  m.set(key, p);
+  p.catch(() => m.delete(key));
+  while (m.size > 500) m.delete(m.keys().next().value!);
+  return p;
+}
+
 /** Runs one tool call in its own RLS-scoped transaction, so every call reads the latest committed data. */
 export async function runTool(name: string, rawInput: unknown, tc: ToolContext): Promise<{ ok: boolean; result: unknown }> {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) return { ok: false, result: { error: `Unknown tool ${name}` } };
   const parsed = tool.parse.safeParse(rawInput ?? {});
   if (!parsed.success) return { ok: false, result: { error: "Invalid input", issues: parsed.error.issues.map((x) => `${x.path.join(".")}: ${x.message}`) } };
+  const compute = () => withUser(tc.actor, async (q) => {
+    const ctx = await getDatasetContext(q, tc.actor.workspaceId, { asOfDate: (parsed.data as { as_of_date?: string }).as_of_date ?? tc.defaultAsOfDate ?? null });
+    return tool.run(q, ctx, parsed.data, tc);
+  });
   try {
-    const result = await withUser(tc.actor, async (q) => {
-      const ctx = await getDatasetContext(q, tc.actor.workspaceId, { asOfDate: (parsed.data as { as_of_date?: string }).as_of_date ?? tc.defaultAsOfDate ?? null });
-      return tool.run(q, ctx, parsed.data, tc);
-    });
+    const result = WRITE_TOOLS.has(name) ? await compute() : await cachedLookup([name, parsed.data, tc.defaultAsOfDate ?? null], tc.actor, compute);
     return { ok: true, result };
   } catch (e) {
     return { ok: false, result: { error: (e as Error).message } };
