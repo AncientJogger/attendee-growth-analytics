@@ -200,6 +200,9 @@ Analytics adapt to what was mapped: a dataset without status history shows "No s
 
 ## Deployment
 
+**This repository is connected to Vercel.** Every push to `main` deploys to production, and every pull request gets its own preview deployment. Environment variables live in Vercel (Settings → Environment Variables), never in this repository.
+
+
 **Quickest way (no database setup).** Upload the project to Vercel and add one environment variable, `ANTHROPIC_API_KEY`. With no `DATABASE_URL`, the app runs an embedded Postgres (PGlite) inside the server, started from the pre-seeded snapshot in `data/fga-db.tar.gz`. Row-level security, roles, approvals and the AI analyst all work the same way. The trade-off is that edits last only while a server instance is running: after a cold start, or on a different instance, the demo data comes back. That suits a demo or review. Rebuild the snapshot after changing the seed or migrations with `npm run db:snapshot`.
 
 **Permanent data (Supabase).** Set `DATABASE_URL` to the Supabase transaction pooler URI (port 6543, ending in `?sslmode=require`) and redeploy. On the first request the app sees an empty database, creates the tables and loads the demo workspace by itself (a few seconds to a minute). Later cold starts only apply any new migrations. Set `AUTO_SETUP=false` to turn that off and run `npm run db:migrate` and `npm run db:seed` yourself. More detail in [docs/deployment.md](docs/deployment.md).
