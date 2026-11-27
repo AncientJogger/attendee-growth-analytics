@@ -15,14 +15,15 @@ const TIME_BUDGET_MS = 200_000;
  * With more than one key set, AI_PROVIDER=gemini|openai|anthropic picks; otherwise the order above.
  * AI_MODEL overrides the model for any provider (ANTHROPIC_MODEL still works for Anthropic).
  */
-export type Provider = "groq" | "gemini" | "openai" | "anthropic";
-type CompatProvider = "groq" | "gemini" | "openai";
+export type Provider = "groq" | "gemini" | "ollama" | "openai" | "anthropic";
+type CompatProvider = "groq" | "gemini" | "ollama" | "openai";
 
 export function aiProvider(): Provider | null {
   const forced = process.env.AI_PROVIDER?.trim().toLowerCase();
-  if (forced === "groq" || forced === "gemini" || forced === "openai" || forced === "anthropic") return forced;
+  if (forced === "groq" || forced === "gemini" || forced === "ollama" || forced === "openai" || forced === "anthropic") return forced;
   if (process.env.GROQ_API_KEY?.trim()) return "groq";
   if (process.env.GEMINI_API_KEY?.trim()) return "gemini";
+  if (process.env.OLLAMA_API_KEY?.trim()) return "ollama";
   if (process.env.OPENAI_API_KEY?.trim()) return "openai";
   if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
   return null;
@@ -34,11 +35,11 @@ export function aiConfigured() {
 }
 
 export function providerKey(p: Provider) {
-  return { groq: process.env.GROQ_API_KEY, gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY }[p]?.trim() || "";
+  return { groq: process.env.GROQ_API_KEY, gemini: process.env.GEMINI_API_KEY, ollama: process.env.OLLAMA_API_KEY, openai: process.env.OPENAI_API_KEY, anthropic: process.env.ANTHROPIC_API_KEY }[p]?.trim() || "";
 }
 
-export const PROVIDER_LABEL: Record<Provider, string> = { groq: "Groq", gemini: "Google Gemini", openai: "OpenAI", anthropic: "Anthropic" };
-const KEY_NAME: Record<Provider, string> = { groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" };
+export const PROVIDER_LABEL: Record<Provider, string> = { groq: "Groq", gemini: "Google Gemini", ollama: "Ollama Cloud", openai: "OpenAI", anthropic: "Anthropic" };
+const KEY_NAME: Record<Provider, string> = { groq: "GROQ_API_KEY", gemini: "GEMINI_API_KEY", ollama: "OLLAMA_API_KEY", openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" };
 export const keyName = (p: Provider | null) => (p ? KEY_NAME[p] : "GROQ_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY");
 
 export function modelName() {
@@ -46,7 +47,8 @@ export function modelName() {
   if (process.env.AI_MODEL?.trim()) return process.env.AI_MODEL.trim();
   if (p === "anthropic") return process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
   if (p === "gemini") return "gemini-flash-latest";
-  if (p === "groq") return "llama-3.3-70b-versatile";
+  if (p === "groq") return "openai/gpt-oss-120b"; // llama-3.3-70b-versatile was shut down on 16 Aug 2026
+  if (p === "ollama") return "gpt-oss:120b";
   return "gpt-5-mini";
 }
 
@@ -60,7 +62,7 @@ export function explainAiError(e: unknown): string {
   if (/did not reply within/i.test(msg)) return `${name} is responding too slowly right now (a problem on their side), even with the lighter model. Ask again in a minute, or add a GROQ_API_KEY in Vercel for faster replies.`;
   if (/\b503\b|high demand|overloaded|unavailable/i.test(msg)) return `${name} is overloaded right now (a temporary problem on their side). The app already retried and tried a lighter model. Wait a minute and ask again, or add a GROQ_API_KEY in Vercel for a faster, more reliable option.`;
   if (/\b429\b|rate limit|resource.?exhausted|too many requests/i.test(msg)) return `${name} is rate-limiting this key. Wait a minute and ask again.`;
-  if (/model/i.test(msg) && /not.?found|404|does not exist|unsupported/i.test(msg)) return `The model ${modelName()} is not available to this key. Set AI_MODEL in Vercel to a model your key can use.`;
+  if (/model/i.test(msg) && /not.?found|404|does not exist|unsupported|decommission|deprecat|no longer/i.test(msg)) return `${name} does not offer the model ${modelName()} (it may have been retired). Set AI_MODEL in Vercel to a current model, or remove AI_MODEL to use the app default.`;
   return `The AI request failed: ${msg.slice(0, 200)}`;
 }
 
@@ -158,6 +160,7 @@ export type ChatFn = (body: Record<string, unknown>) => Promise<{ choices: { mes
 
 const BASE_URL: Record<CompatProvider, string> = {
   groq: "https://api.groq.com/openai/v1/",
+  ollama: "https://ollama.com/v1/",
   gemini: "https://generativelanguage.googleapis.com/v1beta/openai/",
   openai: "https://api.openai.com/v1/",
 };
@@ -171,6 +174,8 @@ function speedParams(p: CompatProvider): Record<string, unknown> {
   const want = process.env.AI_REASONING?.trim().toLowerCase();
   if (want === "default") return {};
   if (p === "gemini") return { reasoning_effort: want || "low" };
+  // gpt-oss models on Groq accept low/medium/high reasoning effort.
+  if (p === "groq" && /gpt-oss/.test(modelName())) return { reasoning_effort: want || "low" };
   if (p === "openai") return { reasoning_effort: want || "low" };
   return want ? { reasoning_effort: want } : {};
 }
@@ -180,7 +185,8 @@ function fallbackModel(p: CompatProvider): string | null {
   const v = process.env.AI_FALLBACK_MODEL?.trim();
   if (v) return v === "none" ? null : v;
   if (p === "gemini") return "gemini-flash-lite-latest";
-  if (p === "groq") return "llama-3.1-8b-instant";
+  if (p === "groq") return "openai/gpt-oss-20b";
+  if (p === "ollama") return "gpt-oss:20b";
   return null;
 }
 
@@ -264,7 +270,9 @@ async function runAgentOpenAICompatible(opts: Parameters<typeof runAgent>[0], p:
     const msg = choice.message;
     stop = choice.finish_reason ?? null;
     // Send the assistant turn back unchanged (Gemini needs its thought signatures on tool calls).
-    messages.push({ ...msg, role: "assistant" });
+    // Gemini needs the assistant turn back unchanged (thought signatures). Other providers get only the
+    // standard fields, since some reject extra ones such as a returned "reasoning" text.
+    messages.push(p === "gemini" ? { ...msg, role: "assistant" } : { role: "assistant", content: msg.content ?? "", ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}) });
     const text = (typeof msg.content === "string" ? msg.content : "").trim();
     if (text) finalText = text;
     const calls = msg.tool_calls ?? [];
@@ -294,7 +302,7 @@ async function runAgentOpenAICompatible(opts: Parameters<typeof runAgent>[0], p:
 /** One tiny request to check the configured key and model. */
 export async function pingAi(): Promise<{ ok: boolean; provider: string | null; model?: string; ms?: number; reply?: string; error?: string }> {
   const p = aiProvider();
-  if (!p || !providerKey(p)) return { ok: false, provider: null, error: "No AI key is set. Add GEMINI_API_KEY (free tier), OPENAI_API_KEY or ANTHROPIC_API_KEY in Vercel and redeploy." };
+  if (!p || !providerKey(p)) return { ok: false, provider: null, error: "No AI key is set. Add GROQ_API_KEY or GEMINI_API_KEY (free tiers), OPENAI_API_KEY or ANTHROPIC_API_KEY in Vercel and redeploy." };
   const t = Date.now();
   try {
     let reply = "";
